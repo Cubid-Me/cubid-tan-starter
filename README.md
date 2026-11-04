@@ -37,6 +37,19 @@ sign-in state lives in `src/hooks/use-siwc-session.ts`, which product apps
 reuse directly; the demo panel in `src/components/cubid/siwc-panel.tsx` is
 built on it.
 
+GitHub squashes a template's history into a single "Initial commit", which
+makes later merges unrelated-history merges. Right after creating the repo,
+while it is still unchanged, align it to the starter's history once:
+
+```sh
+git fetch upstream && git reset --hard upstream/main && git push --force origin main
+```
+
+After that, `git merge upstream/main` is an ordinary merge. The client-side
+sign-in state lives in `src/hooks/use-siwc-session.ts`, which product apps
+reuse directly; the demo panel in `src/components/cubid/siwc-panel.tsx` is
+built on it.
+
 Do not copy wallet-heavy examples, old `cubid-sdk` usage, deprecated
 `@cubid/web2` / `@cubid/web2-react` imports, Cubid-generated wallet creation,
 or normal Cubid transaction-signing examples from the v1 or v2 starters.
@@ -68,6 +81,7 @@ out of browser env vars and client bundles.
 | `src/lib/cubid/siwc.ts`               | SIWC cookies, redaction, return-path safety                             |
 | `src/lib/cubid/server.ts`             | Server-only `@cubid/core` client factory                                |
 | `src/lib/http/*.ts`                   | Cookie and response helpers                                             |
+| `src/hooks/use-siwc-session.ts`       | Client-side sign-in state (reusable in product apps)                    |
 | `src/components/cubid/*.tsx`          | Demo panels                                                             |
 
 Server routes receive a standard `Request` and return a standard `Response`.
