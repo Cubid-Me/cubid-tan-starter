@@ -235,3 +235,25 @@ release notes before upgrading, and fetch current docs with
 `npx @tanstack/cli doc start framework/react/guide/<page>` rather than relying
 on memory. The route tree (`src/routeTree.gen.ts`) is generated on `dev` and
 `build` and is committed.
+
+## Application hooks on sign-in
+
+`siwcCallback(request, { onAuthenticated })` accepts an optional hook that
+runs after the ID token and userinfo are verified, receives the unredacted
+claims, and may return extras stored under `session.app` (for example an
+internal account id). Wrap it in your own callback route:
+
+```ts
+export const Route = createFileRoute('/api/cubid/siwc/callback')({
+  server: {
+    handlers: {
+      GET: ({ request }) =>
+        siwcCallback(request, {
+          onAuthenticated: async ({ subject }) => ({
+            accountId: await resolveAccount(subject),
+          }),
+        }),
+    },
+  },
+})
+```

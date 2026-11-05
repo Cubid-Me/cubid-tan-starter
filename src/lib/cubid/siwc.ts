@@ -86,6 +86,8 @@ export type SiwcTransaction = {
 }
 
 export type SiwcSession = {
+  /** Application-defined extras (for example an internal account id). */
+  app?: Record<string, unknown>
   authenticatedAt: string
   claims: CubidIdTokenClaims | null
   clientId: string
@@ -343,6 +345,7 @@ export function buildSessionSummary(
   return {
     authenticated: true,
     session: {
+      app: session.app ?? null,
       authenticatedAt: session.authenticatedAt,
       claims: redactSiwcValue(session.claims),
       clientId: session.clientId,

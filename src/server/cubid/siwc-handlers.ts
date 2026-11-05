@@ -5,6 +5,7 @@
  * files under `src/routes/api/cubid/siwc/` only wire these into TanStack
  * Start, which keeps the protocol logic testable and framework-neutral.
  */
+import type { CubidIdTokenClaims, CubidUserInfo } from '@cubid/auth'
 import {
   assertCubidAuthorizationState,
   buildCubidAuthorizationUrl,
@@ -40,7 +41,22 @@ import {
   siwcCallbackPath,
   traceEntry,
 } from '#/lib/cubid/siwc'
+import type { SiwcSession } from '#/lib/cubid/siwc'
 import { json, noStoreJson, redirect } from '#/lib/http/responses'
+
+/**
+ * Optional application hooks. `onAuthenticated` runs after the ID token and
+ * userinfo are verified and may return extras stored under `session.app`.
+ * It receives the unredacted claims, so it can look up or create an
+ * application account before anything is persisted in the cookie.
+ */
+export type SiwcHooks = {
+  onAuthenticated?: (input: {
+    claims: CubidIdTokenClaims
+    subject: string
+    userInfo: CubidUserInfo | null
+  }) => Promise<Record<string, unknown> | undefined>
+}
 
 /** GET /api/cubid/siwc/start */
 export async function siwcStart(request: Request): Promise<Response> {
@@ -153,7 +169,10 @@ export async function siwcStart(request: Request): Promise<Response> {
 }
 
 /** GET /api/cubid/siwc/callback */
-export async function siwcCallback(request: Request): Promise<Response> {
+export async function siwcCallback(
+  request: Request,
+  hooks: SiwcHooks = {},
+): Promise<Response> {
   const config = getSiwcConfig(request)
   const returnTo = readReturnToCookie(request)
 
@@ -220,12 +239,21 @@ export async function siwcCallback(request: Request): Promise<Response> {
     if (userInfo && userInfo.sub !== idTokenClaims.sub) {
       return redirectWithError(request, returnTo, 'userinfo_subject_mismatch')
     }
+    let app: Record<string, unknown> | undefined
+    if (hooks.onAuthenticated && typeof idTokenClaims.sub === 'string') {
+      app = await hooks.onAuthenticated({
+        claims: idTokenClaims,
+        subject: idTokenClaims.sub,
+        userInfo,
+      })
+    }
     const response = redirect(
       resolveLocalReturnTo(returnTo, requestOrigin(request)),
     )
     response.headers.set('Referrer-Policy', 'no-referrer')
 
-    setSessionCookie(response, request, {
+    const session: SiwcSession = {
+      app,
       authenticatedAt: new Date().toISOString(),
       claims: authSession.idTokenClaims,
       clientId: authSession.clientId,
@@ -234,7 +262,8 @@ export async function siwcCallback(request: Request): Promise<Response> {
       scope: authSession.scope,
       subject: authSession.subject,
       userInfo: authSession.userInfo,
-    })
+    }
+    setSessionCookie(response, request, session)
     appendTrace(request, response, [
       traceEntry('callback', 'Receive Cubid callback', {
         request: {
