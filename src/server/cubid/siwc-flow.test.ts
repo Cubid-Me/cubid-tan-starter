@@ -92,7 +92,16 @@ describe('SIWC flow against a fake issuer with signed tokens', () => {
     })
     expect(everythingVisible).not.toContain(issuer.accessToken)
     expect(everythingVisible).not.toContain('person@example.com')
-    expect(everythingVisible).not.toContain('eyJ') // no compact JWT anywhere
+    // No compact JWT anywhere: a random cookie value can contain "eyJ" by
+    // chance, so look for three base64url segments whose first decodes to
+    // a JSON object (a JOSE header).
+    const joseLike = everythingVisible.match(
+      /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/gu,
+    )
+    for (const candidate of joseLike ?? []) {
+      const header = Buffer.from(candidate.split('.')[0]!, 'base64url')
+      expect(header.toString('utf8').startsWith('{')).toBe(false)
+    }
 
     const calls = issuer.requests.map(
       (request) => `${request.method} ${request.url}`,
