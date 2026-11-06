@@ -30,7 +30,16 @@ projects add this repo as `upstream` and merge improvements.
 - Redact tokens, codes, PKCE verifiers, nonce/state, cookies and PII in any
   visible trace or session output.
 
+- `onAuthenticated` extras (`session.app`) are browser-visible and capped at
+  1 KiB: ids and roles only. Cookie names come from
+  `CUBID_SIWC_COOKIE_PREFIX`; derived apps set their own prefix.
+
 ## Workflow
 
+- Node 22+ and pnpm 10 (`.nvmrc`, `packageManager`). CI runs
+  `pnpm check`, `lint`, `typecheck`, `test`, `build` on Node 22 and 24.
 - Record each task in `agent-context/session-log/` before committing.
 - Validate with `pnpm test`, `pnpm lint`, `pnpm typecheck`, `pnpm build`.
+  Protocol tests run against `src/test/fake-issuer.ts` with signed tokens;
+  passkey sign-in is validated by hand and recorded in
+  `agent-context/hosted-validation.md`, never claimed from the test suite.

@@ -19,6 +19,8 @@ import {
   LogIn,
 } from 'lucide-react'
 
+import { describeToken, redactValue } from '#/lib/cubid/redact'
+
 const publicConfig = {
   clearPassPageId: import.meta.env.VITE_CUBID_CLEARPASS_PAGE_ID ?? '',
   clientId: import.meta.env.VITE_CUBID_OIDC_CLIENT_ID ?? '',
@@ -27,24 +29,44 @@ const publicConfig = {
   redirectUri: import.meta.env.VITE_CUBID_REDIRECT_URI ?? '',
 }
 
-function missingPublicConfig() {
-  return Object.entries(publicConfig)
-    .filter(([, value]) => !value.trim())
-    .map(([key]) => key)
+const envNames: Record<keyof typeof publicConfig, string> = {
+  clearPassPageId: 'VITE_CUBID_CLEARPASS_PAGE_ID',
+  clientId: 'VITE_CUBID_OIDC_CLIENT_ID',
+  issuer: 'VITE_CUBID_ISSUER_URL',
+  passportBaseUrl: 'VITE_CUBID_PASSPORT_BASE_URL',
+  redirectUri: 'VITE_CUBID_REDIRECT_URI',
 }
 
-function summarizeToken(token: string | null | undefined) {
-  if (!token) {
-    return 'No access token in the current browser session.'
-  }
+/**
+ * Each demo section needs only its own values, so a project that sets up
+ * sign-in first sees sign-in working while the hosted flows still say what
+ * they are waiting for.
+ */
+const requirements = {
+  clearPass: ['passportBaseUrl', 'clearPassPageId'],
+  comms: ['passportBaseUrl'],
+  recovery: ['passportBaseUrl'],
+  signIn: ['issuer', 'clientId', 'redirectUri'],
+} as const satisfies Record<string, ReadonlyArray<keyof typeof publicConfig>>
 
-  return `${token.slice(0, 8)}...${token.slice(-6)} (${token.length} chars)`
+function missingFor(section: keyof typeof requirements): Array<string> {
+  return requirements[section]
+    .filter((key) => !publicConfig[key].trim())
+    .map((key) => envNames[key])
+}
+
+function MissingConfig({ missing }: { missing: Array<string> }) {
+  return (
+    <div className="break-words rounded-md border border-[#e4d4a1] bg-[#fffbea] p-3 text-sm text-[#665313]">
+      Add to `.env.local`: {missing.join(', ')}
+    </div>
+  )
 }
 
 export function BrowserDemo() {
-  const missing = missingPublicConfig()
+  const missingSignIn = missingFor('signIn')
 
-  if (missing.length > 0) {
+  if (missingSignIn.length > 0) {
     return (
       <section className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4 rounded-lg border border-[#d9ddd2] bg-white p-5 shadow-sm">
         <div className="flex min-w-0 items-start gap-3">
@@ -54,15 +76,13 @@ export function BrowserDemo() {
           <div className="min-w-0">
             <h2 className="text-xl font-semibold">Browser UX demo</h2>
             <p className="mt-2 text-sm leading-6 text-[#596456]">
-              Add the browser-safe `VITE_CUBID_*` values from `.env.example` to
-              enable Login with Cubid, ClearPass Verify, notification
-              preferences, and recovery launchers.
+              Browser-only Login with Cubid needs the OIDC values below. The
+              hosted flows (ClearPass Verify, notification preferences,
+              recovery) list their own requirements once sign-in is configured.
             </p>
           </div>
         </div>
-        <div className="mt-5 break-words rounded-md border border-[#e4d4a1] bg-[#fffbea] p-4 text-sm text-[#665313]">
-          Missing browser-safe config: {missing.join(', ')}
-        </div>
+        <MissingConfig missing={missingSignIn} />
       </section>
     )
   }
@@ -92,9 +112,12 @@ function BrowserDemoPanel() {
   }>({ result: null, status: 'idle' })
   const [isPending, startTransition] = useTransition()
   const subject = auth.session?.subject ?? ''
+  const missingClearPass = missingFor('clearPass')
+  const missingComms = missingFor('comms')
+  const missingRecovery = missingFor('recovery')
 
   const clearPassHeadlessUrl = useMemo(() => {
-    if (!subject || !publicConfig.clearPassPageId) {
+    if (!subject || missingClearPass.length > 0) {
       return null
     }
 
@@ -103,7 +126,7 @@ function BrowserDemoPanel() {
       passportOrigin: publicConfig.passportBaseUrl,
       userId: subject,
     })
-  }, [subject])
+  }, [subject, missingClearPass.length])
 
   function loadCommsProfile() {
     if (!auth.session?.accessToken) {
@@ -159,6 +182,16 @@ function BrowserDemoPanel() {
     })
   }
 
+  // What the demo shows of the browser session: the pairwise subject and
+  // protocol claims. Tokens are described, never printed; personal claims
+  // (email, name, picture...) are redacted the same way the server does it.
+  const visibleSession = {
+    accessToken: describeToken(auth.session?.accessToken),
+    claims: redactValue(auth.session?.idTokenClaims ?? null),
+    subject: auth.session?.subject ?? null,
+    userInfo: redactValue(auth.session?.userInfo ?? null),
+  }
+
   return (
     <section className="min-w-0 rounded-lg border border-[#d9ddd2] bg-white p-5 shadow-sm">
       <div className="flex items-start gap-3">
@@ -170,7 +203,8 @@ function BrowserDemoPanel() {
           <p className="mt-2 text-sm leading-6 text-[#596456]">
             These controls use browser-safe packages only: `@cubid/auth-react`,
             `@cubid/browser`, `@cubid/react`, `@cubid/comms`, and
-            `@cubid/wallet-recovery-react`.
+            `@cubid/wallet-recovery-react`. Tokens stay inside
+            `@cubid/auth-react` and personal claims are redacted below.
           </p>
         </div>
       </div>
@@ -203,16 +237,7 @@ function BrowserDemoPanel() {
           </div>
 
           <pre className="mt-4 max-h-64 overflow-auto rounded-md border border-[#dce2d6] bg-white p-3 text-xs leading-5 text-[#263026]">
-            {JSON.stringify(
-              {
-                accessToken: summarizeToken(auth.session?.accessToken),
-                claims: auth.session?.idTokenClaims ?? null,
-                subject: auth.session?.subject ?? null,
-                userInfo: auth.session?.userInfo ?? null,
-              },
-              null,
-              2,
-            )}
+            {JSON.stringify(visibleSession, null, 2)}
           </pre>
         </div>
 
@@ -221,22 +246,28 @@ function BrowserDemoPanel() {
             <ExternalLink size={16} aria-hidden="true" />
             ClearPass Verify
           </div>
-          <ClearPassVerifyButton
-            className="cubid-hosted-widget"
-            pageId={publicConfig.clearPassPageId}
-            passportOrigin={publicConfig.passportBaseUrl}
-            userId={subject}
-          />
-          {clearPassHeadlessUrl ? (
-            <a
-              className="mt-3 inline-flex text-sm font-medium text-[#1f6f50] underline-offset-4 hover:underline"
-              href={clearPassHeadlessUrl}
-              rel="noreferrer"
-              target="_blank"
-            >
-              Open the same URL built by `@cubid/browser`
-            </a>
-          ) : null}
+          {missingClearPass.length > 0 ? (
+            <MissingConfig missing={missingClearPass} />
+          ) : (
+            <>
+              <ClearPassVerifyButton
+                className="cubid-hosted-widget"
+                pageId={publicConfig.clearPassPageId}
+                passportOrigin={publicConfig.passportBaseUrl}
+                userId={subject}
+              />
+              {clearPassHeadlessUrl ? (
+                <a
+                  className="mt-3 inline-flex text-sm font-medium text-[#1f6f50] underline-offset-4 hover:underline"
+                  href={clearPassHeadlessUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Open the same URL built by `@cubid/browser`
+                </a>
+              ) : null}
+            </>
+          )}
         </div>
 
         <div className="rounded-lg border border-[#dce2d6] p-4">
@@ -244,34 +275,40 @@ function BrowserDemoPanel() {
             <Bell size={16} aria-hidden="true" />
             Notification channels and preferences
           </div>
-          <button
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#cfd6c7] bg-white px-4 text-sm font-semibold text-[#1d2a1e] transition hover:bg-[#eef3eb] disabled:cursor-not-allowed disabled:text-[#8a9585]"
-            disabled={isPending || commsState.status === 'loading'}
-            onClick={loadCommsProfile}
-            type="button"
-          >
-            {commsState.status === 'loading' ? (
-              <LoaderCircle
-                className="animate-spin"
-                size={16}
-                aria-hidden="true"
-              />
-            ) : (
-              <Bell size={16} aria-hidden="true" />
-            )}
-            Load preferences
-          </button>
-          <pre
-            className={`mt-3 max-h-56 overflow-auto rounded-md border p-3 text-xs leading-5 ${
-              commsState.status === 'error'
-                ? 'border-[#e0b7ad] bg-[#fff7f5] text-[#713022]'
-                : 'border-[#dce2d6] bg-[#f8faf6] text-[#263026]'
-            }`}
-          >
-            {commsState.status === 'idle'
-              ? 'Signed-in comms metadata appears here.'
-              : JSON.stringify(commsState.result, null, 2)}
-          </pre>
+          {missingComms.length > 0 ? (
+            <MissingConfig missing={missingComms} />
+          ) : (
+            <>
+              <button
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#cfd6c7] bg-white px-4 text-sm font-semibold text-[#1d2a1e] transition hover:bg-[#eef3eb] disabled:cursor-not-allowed disabled:text-[#8a9585]"
+                disabled={isPending || commsState.status === 'loading'}
+                onClick={loadCommsProfile}
+                type="button"
+              >
+                {commsState.status === 'loading' ? (
+                  <LoaderCircle
+                    className="animate-spin"
+                    size={16}
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <Bell size={16} aria-hidden="true" />
+                )}
+                Load preferences
+              </button>
+              <pre
+                className={`mt-3 max-h-56 overflow-auto rounded-md border p-3 text-xs leading-5 ${
+                  commsState.status === 'error'
+                    ? 'border-[#e0b7ad] bg-[#fff7f5] text-[#713022]'
+                    : 'border-[#dce2d6] bg-[#f8faf6] text-[#263026]'
+                }`}
+              >
+                {commsState.status === 'idle'
+                  ? 'Signed-in comms metadata appears here.'
+                  : JSON.stringify(commsState.result, null, 2)}
+              </pre>
+            </>
+          )}
         </div>
 
         <div className="rounded-lg border border-[#dce2d6] p-4">
@@ -279,23 +316,29 @@ function BrowserDemoPanel() {
             <KeyRound size={16} aria-hidden="true" />
             Hosted recoverable-wallet recovery
           </div>
-          <label className="grid gap-2 text-sm font-medium">
-            Recovery session id from the server helper
-            <input
-              className="h-11 rounded-md border border-[#cfd6c7] px-3 text-sm outline-none focus:border-[#1f6f50]"
-              onChange={(event) => setRecoverySessionId(event.target.value)}
-              placeholder="rw_release_..."
-              value={recoverySessionId}
-            />
-          </label>
-          <CubidRecoveryLaunchButton
-            className="mt-3 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-[#1f6f50] px-4 text-sm font-semibold text-white transition hover:bg-[#18593f] disabled:cursor-not-allowed disabled:bg-[#a8b6a1]"
-            disabled={!recoverySessionId.trim()}
-            passportOrigin={publicConfig.passportBaseUrl}
-            recoverySessionId={recoverySessionId}
-          >
-            Open recovery flow
-          </CubidRecoveryLaunchButton>
+          {missingRecovery.length > 0 ? (
+            <MissingConfig missing={missingRecovery} />
+          ) : (
+            <>
+              <label className="grid gap-2 text-sm font-medium">
+                Recovery session id from the server helper
+                <input
+                  className="h-11 rounded-md border border-[#cfd6c7] px-3 text-sm outline-none focus:border-[#1f6f50]"
+                  onChange={(event) => setRecoverySessionId(event.target.value)}
+                  placeholder="rw_release_..."
+                  value={recoverySessionId}
+                />
+              </label>
+              <CubidRecoveryLaunchButton
+                className="mt-3 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-[#1f6f50] px-4 text-sm font-semibold text-white transition hover:bg-[#18593f] disabled:cursor-not-allowed disabled:bg-[#a8b6a1]"
+                disabled={!recoverySessionId.trim()}
+                passportOrigin={publicConfig.passportBaseUrl}
+                recoverySessionId={recoverySessionId}
+              >
+                Open recovery flow
+              </CubidRecoveryLaunchButton>
+            </>
+          )}
         </div>
       </div>
     </section>

@@ -49,6 +49,13 @@ import { json, noStoreJson, redirect } from '#/lib/http/responses'
  * userinfo are verified and may return extras stored under `session.app`.
  * It receives the unredacted claims, so it can look up or create an
  * application account before anything is persisted in the cookie.
+ *
+ * The extras are browser-visible through `/api/cubid/siwc/session` and must
+ * be a plain object under `maxSessionAppBytes` (1 KiB): ids and roles, never
+ * tokens or profiles. A larger or malformed result fails the sign-in with
+ * `siwc_error=app_extras_too_large` or `invalid_app_extras`; a hook that
+ * throws fails it with `callback_failed`. No session cookie is set in
+ * either case.
  */
 export type SiwcHooks = {
   onAuthenticated?: (input: {
@@ -353,6 +360,7 @@ export async function siwcCallback(
       'code' in errorPayload && typeof errorPayload.code === 'string'
         ? errorPayload.code
         : 'callback_failed',
+      errorPayload,
     )
   }
 }
@@ -431,10 +439,17 @@ export async function siwcHealth(): Promise<Response> {
   }
 }
 
+/**
+ * Redirects back to the app with `?siwc_error=<code>` and records the failure
+ * in the trace. `details` (the redacted error payload: code, message, name,
+ * HTTP status) stays in the trace so the panel can show why sign-in failed;
+ * the redirect URL carries only the code.
+ */
 function redirectWithError(
   request: Request,
   returnTo: string,
   error: string,
+  details?: ReturnType<typeof buildErrorPayload>,
 ): Response {
   const url = resolveLocalReturnTo(returnTo, requestOrigin(request))
   url.searchParams.set('siwc_error', error)
@@ -444,7 +459,19 @@ function redirectWithError(
     appendTrace(request, response, [
       traceEntry('error', 'Authorization callback failed', {
         request: { method: 'GET', url: siwcCallbackPath },
-        response: { error },
+        response: {
+          error,
+          // `code` and `name` are redaction keys (authorization code, PII),
+          // so the error payload's fields are stored under other names.
+          details: details
+            ? {
+                errorCode: 'code' in details ? details.code : null,
+                errorName: details.name,
+                message: details.message,
+                status: 'status' in details ? (details.status ?? null) : null,
+              }
+            : null,
+        },
       }),
     ])
   clearSiwcTransaction(response, request)

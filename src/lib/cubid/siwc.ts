@@ -21,18 +21,73 @@ import { CubidAuthError } from '@cubid/auth'
 import type { CubidIdTokenClaims, CubidUserInfo } from '@cubid/auth'
 
 import { deleteCookie, readCookie, setCookie } from '#/lib/http/cookies'
+import { redactValue } from '#/lib/cubid/redact'
 
-export const siwcCookies = {
-  returnTo: 'cubid_siwc_return_to',
-  session: 'cubid_siwc_demo_session',
-  trace: 'cubid_siwc_trace',
-  transaction: 'cubid_siwc_txn',
-} as const
+export const defaultCookiePrefix = 'cubid_siwc'
+
+/**
+ * Cookie prefix, read per call so it follows `process.env` at request time.
+ * Set `CUBID_SIWC_COOKIE_PREFIX` per application: browsers ignore the port,
+ * so two apps on `localhost` with the same prefix would overwrite each
+ * other's session cookies. Lowercase letters, digits and underscores only.
+ */
+export function siwcCookiePrefix(): string {
+  const prefix = process.env.CUBID_SIWC_COOKIE_PREFIX?.trim()
+  if (!prefix) return defaultCookiePrefix
+  if (!/^[a-z][a-z0-9_]{0,31}$/u.test(prefix)) {
+    throw new Error(
+      'CUBID_SIWC_COOKIE_PREFIX must be 1-32 lowercase letters, digits or underscores, starting with a letter.',
+    )
+  }
+  return prefix
+}
+
+export type SiwcCookieNames = {
+  returnTo: string
+  session: string
+  trace: string
+  transaction: string
+}
+
+export function siwcCookieNames(): SiwcCookieNames {
+  const prefix = siwcCookiePrefix()
+  return {
+    returnTo: `${prefix}_return_to`,
+    session: `${prefix}_session`,
+    trace: `${prefix}_trace`,
+    transaction: `${prefix}_txn`,
+  }
+}
+
+/** Cookie names resolved at access time, so `siwcCookies.session` stays valid. */
+export const siwcCookies: Readonly<SiwcCookieNames> = {
+  get returnTo() {
+    return siwcCookieNames().returnTo
+  },
+  get session() {
+    return siwcCookieNames().session
+  },
+  get trace() {
+    return siwcCookieNames().trace
+  },
+  get transaction() {
+    return siwcCookieNames().transaction
+  },
+}
 
 export const siwcCallbackPath = '/api/cubid/siwc/callback'
 
 const transactionMaxAgeSeconds = 10 * 60
 const sessionMaxAgeSeconds = 30 * 60
+
+/**
+ * Browsers cap one cookie at 4096 bytes including its name and attributes,
+ * and the session, trace and transaction cookies travel together on every
+ * request. These bounds keep each SIWC cookie well inside that.
+ */
+export const maxCookieValueBytes = 3500
+/** Bound on the JSON form of `session.app`, the application's extras. */
+export const maxSessionAppBytes = 1024
 // Development sessions intentionally expire when this server process restarts.
 const devGlobal = globalThis as typeof globalThis & {
   cubidSiwcDevelopmentKey?: Buffer
@@ -50,32 +105,6 @@ function cookieKey(): Buffer {
   }
   return developmentKey
 }
-
-const redactedValue = '[redacted]'
-const sensitiveBrowserKeys = new Set([
-  'access_token',
-  'accessToken',
-  'address',
-  'birthdate',
-  'code',
-  'code_verifier',
-  'codeVerifier',
-  'cookie',
-  'cookies',
-  'email',
-  'family_name',
-  'given_name',
-  'id_token',
-  'idToken',
-  'name',
-  'nonce',
-  'phone_number',
-  'picture',
-  'preferred_username',
-  'refresh_token',
-  'refreshToken',
-  'state',
-])
 
 export type SiwcTransaction = {
   codeVerifier: string
@@ -208,27 +237,60 @@ export function setReturnToCookie(
   })
 }
 
+/**
+ * Validates the extras an application hook returns for `session.app`. They
+ * end up in the session cookie and in the browser-visible session summary,
+ * so they must be a small plain object of non-secret values: an account id,
+ * a role, a display preference. Not a profile, not a token.
+ */
+export function assertSessionApp(
+  app: unknown,
+): asserts app is Record<string, unknown> | undefined {
+  if (typeof app === 'undefined') return
+  if (
+    app === null ||
+    typeof app !== 'object' ||
+    Array.isArray(app) ||
+    Object.getPrototypeOf(app) !== Object.prototype
+  ) {
+    throw new CubidAuthError(
+      'onAuthenticated must return a plain object (or undefined) for session.app.',
+      { category: 'validation', code: 'invalid_app_extras' },
+    )
+  }
+  const size = Buffer.byteLength(JSON.stringify(app), 'utf8')
+  if (size > maxSessionAppBytes) {
+    throw new CubidAuthError(
+      `session.app is ${size} bytes; keep it under ${maxSessionAppBytes} (store ids, not profiles).`,
+      { category: 'validation', code: 'app_extras_too_large' },
+    )
+  }
+}
+
 export function setSessionCookie(
   response: Response,
   request: Request,
   session: SiwcSession,
 ) {
-  setCookie(
-    response,
+  assertSessionApp(session.app)
+  const value = encodeCookiePayload(
+    sanitizeSiwcSession(session),
     siwcCookies.session,
-    encodeCookiePayload(
-      sanitizeSiwcSession(session),
-      siwcCookies.session,
-      sessionMaxAgeSeconds,
-    ),
-    {
-      httpOnly: true,
-      maxAge: sessionMaxAgeSeconds,
-      path: '/',
-      sameSite: 'lax',
-      secure: isSecureRequest(request),
-    },
+    sessionMaxAgeSeconds,
   )
+  if (value.length > maxCookieValueBytes) {
+    throw new CubidAuthError(
+      `The SIWC session cookie is ${value.length} bytes; the limit is ${maxCookieValueBytes}.`,
+      { category: 'validation', code: 'session_cookie_too_large' },
+    )
+  }
+  setCookie(response, siwcCookies.session, value, {
+    httpOnly: true,
+    maxAge: sessionMaxAgeSeconds,
+    path: '/',
+    sameSite: 'lax',
+    secure: isSecureRequest(request),
+  })
 }
 
 export function sanitizeSiwcSession(session: SiwcSession): SiwcSession {
@@ -245,7 +307,7 @@ export function setTraceCookie(
   while (
     bounded.length &&
     encodeCookiePayload(bounded, siwcCookies.trace, sessionMaxAgeSeconds)
-      .length > 3500
+      .length > maxCookieValueBytes
   )
     bounded.shift()
   setCookie(
@@ -525,27 +587,4 @@ function hasSafeLocalPathPrefix(value: string): boolean {
   }
 
   return false
-}
-
-function redactValue(value: unknown, key?: string): unknown {
-  if (key && sensitiveBrowserKeys.has(key)) {
-    return value === null || typeof value === 'undefined'
-      ? value
-      : redactedValue
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => redactValue(item))
-  }
-
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([entryKey, entryValue]) => [
-        entryKey,
-        redactValue(entryValue, entryKey),
-      ]),
-    )
-  }
-
-  return value
 }

@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { responseCookie } from '#/lib/http/cookies'
 import {
   assertSiwcDiscoveryIssuer,
   buildSessionSummary,
+  maxCookieValueBytes,
+  maxSessionAppBytes,
   normalizeReturnTo,
   readSessionCookie,
   readTransactionCookie,
@@ -11,8 +13,143 @@ import {
   resolveLocalReturnTo,
   sanitizeSiwcSession,
   setSessionCookie,
+  siwcCookieNames,
+  siwcCookies,
   traceEntry,
 } from './siwc'
+import type { SiwcSession } from './siwc'
+
+const baseSession: SiwcSession = {
+  authenticatedAt: '2026-07-20T00:00:00.000Z',
+  claims: null,
+  clientId: 'starter',
+  expiresAt: 1_900_000_000_000,
+  issuer: 'https://id.cubid.me',
+  scope: ['openid'],
+  subject: 'pairwise-subject',
+  userInfo: null,
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
+
+describe('SIWC cookie names', () => {
+  it('derives every cookie name from the default prefix', () => {
+    expect(siwcCookieNames()).toEqual({
+      returnTo: 'cubid_siwc_return_to',
+      session: 'cubid_siwc_session',
+      trace: 'cubid_siwc_trace',
+      transaction: 'cubid_siwc_txn',
+    })
+  })
+
+  it('reads CUBID_SIWC_COOKIE_PREFIX at access time so apps on one host do not collide', () => {
+    vi.stubEnv('CUBID_SIWC_COOKIE_PREFIX', 'vmm')
+    expect(siwcCookies.session).toBe('vmm_session')
+    expect(siwcCookies.transaction).toBe('vmm_txn')
+    const response = new Response(null)
+    setSessionCookie(
+      response,
+      new Request('http://localhost:3000'),
+      baseSession,
+    )
+    expect(responseCookie(response, 'vmm_session')).toBeDefined()
+    expect(responseCookie(response, 'cubid_siwc_session')).toBeUndefined()
+  })
+
+  it('rejects a prefix that is not a safe cookie-name fragment', () => {
+    vi.stubEnv('CUBID_SIWC_COOKIE_PREFIX', 'My App')
+    expect(() => siwcCookies.session).toThrowError(/CUBID_SIWC_COOKIE_PREFIX/u)
+  })
+})
+
+describe('SIWC session extras', () => {
+  it('stores small plain-object extras and exposes them in the summary', () => {
+    const response = new Response(null)
+    setSessionCookie(response, new Request('http://localhost:3000'), {
+      ...baseSession,
+      app: { accountId: 'acct_1', role: 'member' },
+    })
+    const value = responseCookie(response, siwcCookies.session)!
+    const session = readSessionCookie(
+      new Request('http://localhost:3000', {
+        headers: { cookie: `${siwcCookies.session}=${value}` },
+      }),
+    )
+    expect(session?.app).toEqual({ accountId: 'acct_1', role: 'member' })
+    expect(buildSessionSummary(session).session?.app).toEqual({
+      accountId: 'acct_1',
+      role: 'member',
+    })
+  })
+
+  it('redacts sensitive keys inside extras before they reach the cookie', () => {
+    const response = new Response(null)
+    setSessionCookie(response, new Request('http://localhost:3000'), {
+      ...baseSession,
+      app: { accountId: 'acct_1', email: 'person@example.com' },
+    })
+    const value = responseCookie(response, siwcCookies.session)!
+    const session = readSessionCookie(
+      new Request('http://localhost:3000', {
+        headers: { cookie: `${siwcCookies.session}=${value}` },
+      }),
+    )
+    expect(session?.app).toEqual({ accountId: 'acct_1', email: '[redacted]' })
+  })
+
+  it.each([
+    ['an array', ['acct_1']],
+    ['a string', 'acct_1'],
+    ['null', null],
+    ['a class instance', new Date(0)],
+  ])('rejects %s as extras', (_label, app) => {
+    expect(() =>
+      setSessionCookie(
+        new Response(null),
+        new Request('http://localhost:3000'),
+        {
+          ...baseSession,
+          app: app as never,
+        },
+      ),
+    ).toThrowError(/plain object/u)
+  })
+
+  it('rejects extras over the byte limit and never sets a cookie', () => {
+    const response = new Response(null)
+    expect(() =>
+      setSessionCookie(response, new Request('http://localhost:3000'), {
+        ...baseSession,
+        app: { profile: 'x'.repeat(maxSessionAppBytes) },
+      }),
+    ).toThrowError(/app_extras_too_large|keep it under/u)
+    expect(response.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('bounds the whole session cookie, not only the extras', () => {
+    const response = new Response(null)
+    // Incompressible claims push the encrypted cookie past the limit even
+    // though the extras alone are small.
+    const claims = Object.fromEntries(
+      Array.from({ length: 60 }, (_, index) => [
+        `claim_${index}`,
+        Buffer.from(
+          Array.from({ length: 48 }, () => Math.floor(Math.random() * 256)),
+        ).toString('base64url'),
+      ]),
+    )
+    expect(() =>
+      setSessionCookie(response, new Request('http://localhost:3000'), {
+        ...baseSession,
+        app: { accountId: 'acct_1' },
+        claims: claims,
+      }),
+    ).toThrowError(new RegExp(String(maxCookieValueBytes), 'u'))
+    expect(response.headers.get('set-cookie')).toBeNull()
+  })
+})
 
 describe('SIWC safety helpers', () => {
   it('authenticates cookie contents and prevents cookie purpose substitution', () => {
@@ -27,21 +164,20 @@ describe('SIWC safety helpers', () => {
       subject: 'pairwise-subject',
       userInfo: null,
     })
-    const value = responseCookie(response, 'cubid_siwc_demo_session')!
+    const value = responseCookie(response, 'cubid_siwc_session')!
     const requestWith = (cookie: string) =>
       new Request('http://localhost:3000', { headers: { cookie } })
     expect(
-      readSessionCookie(requestWith(`cubid_siwc_demo_session=${value}`))
-        ?.subject,
+      readSessionCookie(requestWith(`cubid_siwc_session=${value}`))?.subject,
     ).toBe('pairwise-subject')
     const changed = `${value.slice(0, 30)}${value[30] === 'a' ? 'b' : 'a'}${value.slice(31)}`
     expect(
-      readSessionCookie(requestWith(`cubid_siwc_demo_session=${changed}`)),
+      readSessionCookie(requestWith(`cubid_siwc_session=${changed}`)),
     ).toBeNull()
     expect(
       readSessionCookie(
         requestWith(
-          `cubid_siwc_demo_session=${Buffer.from(JSON.stringify({ authenticated: true })).toString('base64url')}`,
+          `cubid_siwc_session=${Buffer.from(JSON.stringify({ authenticated: true })).toString('base64url')}`,
         ),
       ),
     ).toBeNull()

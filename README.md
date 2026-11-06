@@ -9,50 +9,58 @@ TanStack sibling of
 personhood and sybil-defense signals, Login with Cubid, ClearPass Verify, user
 notification preferences, and passkey-first wallet recovery.
 
-This repository is a GitHub template. Create a project from it with
-**Use this template**, or with the GitHub CLI:
+## Starting A Project: Template Or Fork
+
+This repository is a GitHub template. Either way of starting keeps you able
+to merge later starter improvements; they differ in history.
+
+**Template** (the default). Create the repo with **Use this template** or:
 
 ```sh
 gh repo create my-app --template Cubid-Me/cubid-tan-starter --private --clone
 ```
 
-To keep pulling starter improvements into a derived project, add this repo as
-an `upstream` remote and merge:
+GitHub squashes a template's history into one "Initial commit", so a later
+`git merge upstream/main` would be an unrelated-history merge. Right after
+creating the repo, while it is still untouched, align it to the starter's
+history once. This rewrites the new repo's `main`; do it only before anyone
+has pushed work there:
 
 ```sh
 git remote add upstream https://github.com/Cubid-Me/cubid-tan-starter.git
+git fetch upstream && git reset --hard upstream/main && git push --force origin main
+```
+
+**Fork**, when you want the full history without a force-push, or the
+project lives in another organization. Fork on GitHub, clone, then:
+
+```sh
+git remote add upstream https://github.com/Cubid-Me/cubid-tan-starter.git
+```
+
+From then on, in both cases, pull starter improvements with an ordinary
+merge:
+
+```sh
 git fetch upstream && git merge upstream/main
 ```
 
-GitHub squashes a template's history into a single "Initial commit", which
-makes later merges unrelated-history merges. Right after creating the repo,
-while it is still unchanged, align it to the starter's history once:
-
-```sh
-git fetch upstream && git reset --hard upstream/main && git push --force origin main
-```
-
-After that, `git merge upstream/main` is an ordinary merge. The client-side
-sign-in state lives in `src/hooks/use-siwc-session.ts`, which product apps
-reuse directly; the demo panel in `src/components/cubid/siwc-panel.tsx` is
-built on it.
-
-GitHub squashes a template's history into a single "Initial commit", which
-makes later merges unrelated-history merges. Right after creating the repo,
-while it is still unchanged, align it to the starter's history once:
-
-```sh
-git fetch upstream && git reset --hard upstream/main && git push --force origin main
-```
-
-After that, `git merge upstream/main` is an ordinary merge. The client-side
-sign-in state lives in `src/hooks/use-siwc-session.ts`, which product apps
-reuse directly; the demo panel in `src/components/cubid/siwc-panel.tsx` is
-built on it.
+The client-side sign-in state lives in `src/hooks/use-siwc-session.ts`,
+which product apps reuse directly; the demo panel in
+`src/components/cubid/siwc-panel.tsx` is built on it. When a derived project
+fixes something every Cubid app would want (auth flow, cookie handling,
+tooling), port it back here as a PR.
 
 Do not copy wallet-heavy examples, old `cubid-sdk` usage, deprecated
 `@cubid/web2` / `@cubid/web2-react` imports, Cubid-generated wallet creation,
 or normal Cubid transaction-signing examples from the v1 or v2 starters.
+
+## Supported Runtime
+
+Node 22 or later (`.nvmrc` says 22; CI runs 22 and 24) and pnpm 10
+(`packageManager` in `package.json`, so Corepack picks it up). The build
+targets the generic Nitro Node server; host presets are added with
+`npx @tanstack/cli add <host>`.
 
 ## What This Starter Shows
 
@@ -158,22 +166,66 @@ module scope; edge runtimes inject env at request time.
 | `CUBID_SIWC_LOGIN_BASE_URL`    | Optional public Login deployment diagnostic.          | Defaults to `https://login.cubid.me`. Authorization uses issuer discovery independently.                                                |
 | `VITE_CUBID_CLEARPASS_PAGE_ID` | ClearPass Verify launcher.                            | Required only for the ClearPass Verify demo. Browser-safe because it identifies a hosted verification page, not a secret.               |
 
-## Cubid Console Setup
+## Cubid OIDC Client Setup
 
-Create or configure an OIDC client in Cubid with:
+The starter needs one OIDC client per app and environment. The exact
+callbacks for local development on port 3000 are:
 
-- Issuer URL: the Cubid issuer, for example `https://id.cubid.me`.
-- Client id: copied into `VITE_CUBID_OIDC_CLIENT_ID` and `CUBID_SIWC_CLIENT_ID`.
-- Browser callback redirect URI: `http://localhost:3000/auth/callback` for the
-  browser-only demo.
-- Server SIWC callback redirect URI:
-  `http://localhost:3000/api/cubid/siwc/callback` for the server-mediated
-  flow.
-- Post-logout redirect URI: `http://localhost:3000` for local dev.
+| Flow                                     | Redirect URI                                    |
+| ---------------------------------------- | ----------------------------------------------- |
+| Server-mediated SIWC (`CUBID_SIWC_*`)    | `http://localhost:3000/api/cubid/siwc/callback` |
+| Browser-only Login with Cubid (`VITE_*`) | `http://localhost:3000/auth/callback`           |
+| Post-logout return                       | `http://localhost:3000`                         |
 
-For a hosted deployment, register the exact production origin and callback
-URIs, and register preview callbacks separately and exactly as the host serves
-them. Never reuse the production callback URL for previews.
+Register them exactly as the browser will send them: scheme, host, port and
+path. `localhost` and `127.0.0.1` are different hosts to the issuer, so
+register both if you open the app on both (see the cookie prefix note
+below). The client id goes into `CUBID_SIWC_CLIENT_ID` (and
+`VITE_CUBID_OIDC_CLIENT_ID` for the browser demo).
+
+**In Cubid Admin.** Create the client at [admin.cubid.me](https://admin.cubid.me/)
+and paste the redirect URIs from the table.
+
+**By dynamic registration.** The issuer supports OpenID Connect Dynamic
+Client Registration; the endpoint is `registration_endpoint` in
+`https://id.cubid.me/.well-known/openid-configuration` (currently
+`https://id.cubid.me/register`). This registers a public web client (PKCE,
+no client secret) and saves the response, which is gitignored by the
+`.env*` rule:
+
+```sh
+curl -sS -X POST https://id.cubid.me/register \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "client_name": "My App - Local Development",
+    "redirect_uris": ["http://localhost:3000/api/cubid/siwc/callback", "http://localhost:3000/auth/callback"],
+    "post_logout_redirect_uris": ["http://localhost:3000"],
+    "grant_types": ["authorization_code"],
+    "token_endpoint_auth_method": "none",
+    "scope": "openid profile email"
+  }' -o .env.local.siwc.json -w 'HTTP %{http_code}\n'
+```
+
+The response's `client_id` is the value for `.env.local`. It also carries a
+`registration_access_token` for editing the client later; keep the file out
+of version control and out of chat. New clients start `unverified`, which is
+fine for development.
+
+For a hosted deployment, register a separate client with the exact
+production origin and callbacks, and register preview callbacks separately
+and exactly as the host serves them. Never reuse the production callback URL
+for previews.
+
+### One cookie prefix per app
+
+The SIWC cookies are named `<prefix>_session`, `<prefix>_txn`,
+`<prefix>_trace` and `<prefix>_return_to`, with `cubid_siwc` as the default
+prefix. Browsers scope cookies by host and ignore the port, so two starter
+apps running on `localhost:3000` and `localhost:3001` with the same prefix
+overwrite each other's session: signing in to one signs you out of the
+other. Set `CUBID_SIWC_COOKIE_PREFIX` to a short per-app name
+(`myapp`) in every derived project, or open the second app on `127.0.0.1`
+and register that callback host too.
 
 The server-mediated flow reads every concrete OIDC endpoint from discovery and
 rejects discovery metadata whose issuer does not exactly match the configured
@@ -203,15 +255,36 @@ session is not a replacement for application session management.
 ## Validation
 
 ```sh
-pnpm test
+pnpm check       # prettier
 pnpm lint
 pnpm typecheck
+pnpm test
 pnpm build
 ```
 
-The tests cover missing configuration, mismatched callback state, mismatched
-ID-token nonce, configured/discovered issuer mismatch, safe return paths,
-forged cookies, and recursive trace/session redaction.
+CI (`.github/workflows/ci.yml`) runs the same five steps on Node 22 and 24
+for every push to `main` and every pull request.
+
+The tests cover the whole server-mediated flow against a fake issuer
+(`src/test/fake-issuer.ts`): real P-256 keys, discovery, JWKS, PKCE
+checking at the token endpoint, an ID token signed by the issuer and
+verified by `@cubid/auth` with nothing mocked but `fetch`, a token signed by
+the wrong key, a rejected code, and the `onAuthenticated` hook (extras
+stored, oversized or malformed extras refused, a throwing hook). They also
+cover missing configuration, mismatched callback state, mismatched ID-token
+nonce, configured/discovered issuer mismatch, safe return paths, forged
+cookies, the cookie prefix, cookie size bounds, and recursive trace/session
+redaction.
+
+### Hosted passkey validation
+
+Passkeys cannot be exercised by automated tests: the ceremony runs in the
+user's authenticator against the hosted issuer. Validate it by hand against
+a registered client and record the run in
+`agent-context/hosted-validation.md` (date, issuer, client, host, result),
+separately from the automated suite. The checklist there covers the
+authorize redirect, the passkey prompt, the callback, the session summary
+and the redacted trace, logout, and the browser-only demo.
 
 ## Deployment
 
@@ -241,7 +314,15 @@ on memory. The route tree (`src/routeTree.gen.ts`) is generated on `dev` and
 `siwcCallback(request, { onAuthenticated })` accepts an optional hook that
 runs after the ID token and userinfo are verified, receives the unredacted
 claims, and may return extras stored under `session.app` (for example an
-internal account id). Wrap it in your own callback route:
+internal account id). The extras go into the encrypted session cookie and
+are returned to the browser by `/api/cubid/siwc/session`, so they must be a
+plain object of non-secret values under 1 KiB (`maxSessionAppBytes`): ids
+and roles, not profiles or tokens. Keys from the redaction list (`email`,
+`name`, ...) are redacted inside them too. A larger or malformed result
+fails the sign-in with `siwc_error=app_extras_too_large` or
+`invalid_app_extras`, a throwing hook with `callback_failed`, and no session
+cookie is set. The whole session cookie is capped at 3500 bytes
+(`maxCookieValueBytes`). Wrap the hook in your own callback route:
 
 ```ts
 export const Route = createFileRoute('/api/cubid/siwc/callback')({

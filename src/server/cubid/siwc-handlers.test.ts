@@ -76,7 +76,7 @@ describe('SIWC route guards', () => {
     ).toString('base64url')
     const result = session(
       new Request('http://localhost:3000/api/cubid/siwc/session', {
-        headers: { cookie: `cubid_siwc_demo_session=${forged}` },
+        headers: { cookie: `cubid_siwc_session=${forged}` },
       }),
     )
     expect((await result.json()).authenticated).toBe(false)
